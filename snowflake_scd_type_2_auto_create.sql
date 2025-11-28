@@ -8,18 +8,24 @@ var scd_sql = "";
 
 snowflake.execute({sqlText: "BEGIN;"});
 try {
+    // Step 0: Create target table and add SCD columns if they don't exist.
+    snowflake.execute({sqlText: `CREATE TABLE IF NOT EXISTS ${target_table} LIKE ${source_table};`});
+    snowflake.execute({sqlText: `ALTER TABLE IF EXISTS ${target_table} ADD COLUMN IF NOT EXISTS START_DATE TIMESTAMP;`});
+    snowflake.execute({sqlText: `ALTER TABLE IF EXISTS ${target_table} ADD COLUMN IF NOT EXISTS END_DATE TIMESTAMP;`});
+    snowflake.execute({sqlText: `ALTER TABLE IF EXISTS ${target_table} ADD COLUMN IF NOT EXISTS IS_CURRENT BOOLEAN;`});
+
     // Step 1: Expire records that have changed.
     scd_sql = `
-        MERGE INTO ${TARGET_TABLE} AS t
-        USING ${SOURCE_TABLE} AS s
-        ON t.${KEY_COLUMN} = s.${KEY_COLUMN}
-        WHEN MATCHED AND t.is_current = TRUE AND t.${HASH_COLUMN} <> s.${HASH_COLUMN} THEN
+        MERGE INTO ${target_table} AS t
+        USING ${source_table} AS s
+        ON t.${key_column} = s.${key_column}
+        WHEN MATCHED AND t.is_current = TRUE AND t.${hash_column} <> s.${hash_column} THEN
             UPDATE SET t.end_date = CURRENT_TIMESTAMP(), t.is_current = FALSE;
     `;
     snowflake.execute({sqlText: scd_sql});
 
     // Get the column list from the source table to make the insert dynamic
-    var get_cols_stmt = snowflake.createStatement({sqlText: `DESC TABLE ${SOURCE_TABLE};`});
+    var get_cols_stmt = snowflake.createStatement({sqlText: `DESC TABLE ${source_table};`});
     var cols_rs = get_cols_stmt.execute();
     var column_list = [];
     while (cols_rs.next()) {
@@ -33,12 +39,12 @@ try {
 
     // Step 2: Insert new records and the new versions of changed records.
     scd_sql = `
-        INSERT INTO ${TARGET_TABLE} (${columns_str}, start_date, end_date, is_current)
+        INSERT INTO ${target_table} (${columns_str}, start_date, end_date, is_current)
         SELECT ${s_columns_str}, CURRENT_TIMESTAMP(), NULL, TRUE
-        FROM ${SOURCE_TABLE} AS s
-        LEFT JOIN ${TARGET_TABLE} AS t
-        ON s.${KEY_COLUMN} = t.${KEY_COLUMN} AND t.is_current = TRUE
-        WHERE t.${KEY_COLUMN} IS NULL OR t.${HASH_COLUMN} <> s.${HASH_COLUMN};
+        FROM ${source_table} AS s
+        LEFT JOIN ${target_table} AS t
+        ON s.${key_column} = t.${key_column} AND t.is_current = TRUE
+        WHERE t.${key_column} IS NULL OR t.${hash_column} <> s.${hash_column};
     `;
     snowflake.execute({sqlText: scd_sql});
 
