@@ -1,4 +1,4 @@
-CREATE OR REPLACE PROCEDURE SCD_TYPE_2_AUTO_TBL_LOG(source_table STRING, target_table STRING, key_column STRING, hash_column STRING, log_table STRING)
+CREATE OR REPLACE PROCEDURE SCD_TYPE_2_FINAL(source_table STRING, target_table STRING, key_column STRING, hash_column STRING, log_table STRING)
 RETURNS STRING
 LANGUAGE JAVASCRIPT
 EXECUTE AS CALLER
@@ -16,7 +16,7 @@ var rows_inserted = 0;
 
 try {
     // Step 0: DDL - Ensure target and log tables exist with the correct schema.
-    // These statements are executed immediately and are auto-committing.
+    // These are auto-committing and run outside the main procedure transaction.
     snowflake.execute({sqlText: `CREATE TABLE IF NOT EXISTS ${p_target_table} LIKE ${p_source_table};`});
     snowflake.execute({sqlText: `ALTER TABLE IF EXISTS ${p_target_table} ADD COLUMN IF NOT EXISTS START_DATE TIMESTAMP;`});
     snowflake.execute({sqlText: `ALTER TABLE IF EXISTS ${p_target_table} ADD COLUMN IF NOT EXISTS END_DATE TIMESTAMP;`});
@@ -46,9 +46,7 @@ try {
     var columns_str = quoted_column_list.join(', ');
     var s_columns_str = column_list.map(c => `s."${c}"`).join(', ');
 
-    // Step 1: DML - Execute as an atomic transaction.
-    snowflake.execute({sqlText: "BEGIN;"});
-
+    // Step 1: DML - Execute within the procedure's implicit transaction.
     var merge_sql = `
         MERGE INTO ${p_target_table} AS t
         USING ${p_source_table} AS s
@@ -74,7 +72,7 @@ try {
     insert_rs.next();
     rows_inserted = insert_rs.getColumnValue(1);
 
-    snowflake.execute({sqlText: "COMMIT;"});
+    // If successful, the implicit transaction will commit upon completion.
 
     // Log success
     var success_log_sql = `
@@ -86,17 +84,9 @@ try {
     return `SCD Type 2 procedure completed successfully. Rows Updated: ${rows_updated}, Rows Inserted: ${rows_inserted}`;
 
 } catch (err) {
-    // Roll back the main transaction first to ensure data integrity.
-    snowflake.execute({sqlText: "ROLLBACK;"});
-
-    // Then, attempt to log the failure.
-    var error_message = err.message.replace(/'/g, "''"); // Escape single quotes for SQL string
-    var failure_log_sql = `
-        INSERT INTO ${p_log_table} (RUN_TIMESTAMP, SOURCE_TABLE, TARGET_TABLE, STATUS, ROWS_UPDATED, ROWS_INSERTED, ERROR_MESSAGE)
-        VALUES (CURRENT_TIMESTAMP(), '${p_source_table}', '${p_target_table}', 'FAILED', ${rows_updated}, ${rows_inserted}, '${error_message}');
-    `;
-    snowflake.execute({sqlText: failure_log_sql});
-
-    throw err; // Re-throw the original error to fail the procedure call.
+    // An uncaught error will cause Snowflake to automatically roll back the implicit transaction.
+    // The INSERT into the log table for failures is removed, as it would be rolled back anyway.
+    // The calling application (e.g., Dataiku) is responsible for catching and logging the procedure's failure.
+    throw err; // Re-throw the original error to ensure the transaction rolls back and the procedure fails.
 }
 $$;
